@@ -1,5 +1,5 @@
 // ============================================================
-// Stickman War — rendering, input, animation, weapons.
+// Stickman War — rendering, input, animation, weapons, audio.
 // Physics/collision/AI all live in game.wasm (AssemblyScript).
 // ============================================================
 
@@ -14,16 +14,16 @@ window.addEventListener('resize', resize);
 resize();
 
 // ---------------- Weapons ----------------
+const WEAPON_ORDER = ['glock', 'ak47', 'minigun'];
 const WEAPONS = {
-  glock:   { name: 'GLOCK', dmg: 22, cooldown: 0.32, speed: 640, spread: 0.02, auto: false },
-  ak47:    { name: 'AK-47', dmg: 12, cooldown: 0.13, speed: 760, spread: 0.05, auto: true },
-  minigun: { name: 'MINIGUN', dmg: 6,  cooldown: 0.045, speed: 820, spread: 0.09, auto: true },
+  glock:   { name: 'GLOCK',   dmg: 22, cooldown: 0.32,  speed: 640, spread: 0.02, sound: { freq: 1500, q: 1.0, dur: 0.05,  gain: 0.5 } },
+  ak47:    { name: 'AK-47',   dmg: 12, cooldown: 0.13,  speed: 760, spread: 0.05, sound: { freq: 900,  q: 0.8, dur: 0.075, gain: 0.55 } },
+  minigun: { name: 'MINIGUN', dmg: 6,  cooldown: 0.045, speed: 820, spread: 0.09, sound: { freq: 1800, q: 1.4, dur: 0.028, gain: 0.4 } },
 };
 let currentWeaponKey = 'ak47';
 let weaponCooldownTimer = 0;
 
-// ---------------- World / level data ----------------
-// Ground + platforms + one ladder zone. Coordinates in world space.
+// ---------------- World / level data (burned-city level 1) ----------------
 const GROUND_Y = 620;
 const LEVEL_WIDTH = 3200;
 const platforms = [
@@ -36,15 +36,31 @@ const platforms = [
   { x: 1900, y: 460,      w: 200,  h: 26,  type: 0 },
   { x: 2200, y: 360,      w: 160,  h: 26,  type: 0 },
   { x: 2500, y: 500,      w: 220,  h: 26,  type: 0 },
-  // ladder
-  { x: 1040, y: 300, w: 40, h: 320, type: 1 },
+  { x: 1040, y: 300, w: 40, h: 320, type: 1 }, // ladder
 ];
-// foreground decorative silhouettes the player can pass behind (pure visual, no physics)
-const foregroundDecor = [
-  { x: 260, y: GROUND_Y - 40, w: 90, h: 140, kind: 'crate' },
-  { x: 1300, y: GROUND_Y - 30, w: 70, h: 110, kind: 'crate' },
-  { x: 1980, y: GROUND_Y - 200, w: 60, h: 260, kind: 'pillar' },
-  { x: 2700, y: GROUND_Y - 40, w: 90, h: 140, kind: 'crate' },
+// burning wrecked cars — foreground, player can pass behind them
+const wreckedCars = [
+  { x: 300,  y: GROUND_Y - 46, w: 130, h: 46 },
+  { x: 1350, y: GROUND_Y - 46, w: 130, h: 46 },
+  { x: 2050, y: GROUND_Y - 46, w: 130, h: 46 },
+  { x: 2750, y: GROUND_Y - 46, w: 130, h: 46 },
+];
+// broken buildings, background skyline (fixed jagged silhouette, drawn once per shape)
+const buildings = [
+  { x: 60,   w: 140, h: 260, broken: 0.15 },
+  { x: 260,  w: 100, h: 340, broken: 0.35 },
+  { x: 420,  w: 170, h: 220, broken: 0.05 },
+  { x: 660,  w: 120, h: 300, broken: 0.4 },
+  { x: 860,  w: 150, h: 260, broken: 0.2 },
+  { x: 1100, w: 110, h: 360, broken: 0.5 },
+  { x: 1300, w: 160, h: 240, broken: 0.1 },
+  { x: 1560, w: 130, h: 320, broken: 0.3 },
+  { x: 1780, w: 100, h: 280, broken: 0.45 },
+  { x: 1980, w: 170, h: 230, broken: 0.15 },
+  { x: 2250, w: 120, h: 340, broken: 0.35 },
+  { x: 2480, w: 150, h: 260, broken: 0.25 },
+  { x: 2730, w: 110, h: 300, broken: 0.4 },
+  { x: 2950, w: 140, h: 250, broken: 0.2 },
 ];
 
 // ---------------- Wasm loading ----------------
@@ -55,14 +71,14 @@ async function loadWasm() {
   const imports = { env: { abort: () => console.error('wasm abort') } };
   const { instance } = await WebAssembly.instantiate(bytes, imports);
   wasm = instance.exports;
-  wasm.resetWorld();
-  for (const p of platforms) wasm.addPlatform(p.x, p.y, p.w, p.h, p.type);
 }
 
 let playerTeam = 0; // 0 blue, 1 red
 let enemyCount = 0;
 
-function buildEntities() {
+function buildWorld() {
+  wasm.resetWorld();
+  for (const p of platforms) wasm.addPlatform(p.x, p.y, p.w, p.h, p.type);
   wasm.spawnEntity(120, GROUND_Y - 90, 26, 60, playerTeam, 100); // player idx 0
   const enemyTeam = playerTeam === 0 ? 1 : 0;
   const spots = [
@@ -75,12 +91,14 @@ function buildEntities() {
 }
 
 // ---------------- Input ----------------
+// Move: Arrow Left/Right. Jump: Space. Climb: hold Arrow Up/Down on a ladder.
+// Shoot: S. Switch weapon: A (cycles Glock -> AK-47 -> Minigun -> ...).
 const keys = {};
+const CAPTURED_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space', 'KeyS', 'KeyA']);
 window.addEventListener('keydown', (e) => {
+  if (CAPTURED_KEYS.has(e.code)) e.preventDefault();
+  if (e.code === 'KeyA' && !keys[e.code]) cycleWeapon();
   keys[e.code] = true;
-  if (e.code === 'Digit1') switchWeapon('glock');
-  if (e.code === 'Digit2') switchWeapon('ak47');
-  if (e.code === 'Digit3') switchWeapon('minigun');
 });
 window.addEventListener('keyup', (e) => keys[e.code] = false);
 let mouseDown = false;
@@ -89,219 +107,346 @@ window.addEventListener('mouseup', () => mouseDown = false);
 canvas.addEventListener('touchstart', () => mouseDown = true, { passive: true });
 window.addEventListener('touchend', () => mouseDown = false);
 
-function switchWeapon(key) {
-  currentWeaponKey = key;
-  document.getElementById('weaponName').textContent = WEAPONS[key].name;
+function cycleWeapon() {
+  const idx = WEAPON_ORDER.indexOf(currentWeaponKey);
+  currentWeaponKey = WEAPON_ORDER[(idx + 1) % WEAPON_ORDER.length];
+  showWeaponToast(currentWeaponKey);
 }
 
-// ---------------- Hand-drawn stickman rendering ----------------
-// Every stroke gets a tiny per-frame random jitter so linework
-// feels hand-inked / flash-animated rather than a static vector.
-function jit(seed) {
-  return (Math.sin(seed * 12.9898) * 43758.5453 % 1) * 1.6;
+// ---------------- Weapon switch toast ----------------
+let weaponToastTimer = null;
+function showWeaponToast(key) {
+  const el = document.getElementById('weaponToast');
+  document.getElementById('weaponToastName').textContent = WEAPONS[key].name;
+  const iconCanvas = document.getElementById('weaponToastIcon');
+  const ictx = iconCanvas.getContext('2d');
+  ictx.clearRect(0, 0, iconCanvas.width, iconCanvas.height);
+  ictx.save();
+  ictx.translate(6, iconCanvas.height / 2);
+  paintGunShape(ictx, key, 0, 0);
+  ictx.restore();
+  el.classList.add('show');
+  clearTimeout(weaponToastTimer);
+  weaponToastTimer = setTimeout(() => el.classList.remove('show'), 1500);
 }
-let frameSeedBase = 0;
 
-function wobblyLine(x1, y1, x2, y2, seedA, seedB) {
-  const midx = (x1 + x2) / 2 + jit(seedA + frameSeedBase);
-  const midy = (y1 + y2) / 2 + jit(seedB + frameSeedBase);
+// ---------------- Smooth wobble (fixed: continuous, not a chaotic hash) ----------------
+// The old jitter used sin(x)*bignum % 1, which is numerically unstable and
+// jumps discontinuously frame to frame — that's what read as "shaky/weird".
+// This version is a sum of two slow sines: continuous, small, and stable.
+function wobble(seed, t, amp) {
+  return Math.sin(t * 7.3 + seed * 3.1) * amp * 0.6 + Math.sin(t * 2.6 + seed * 1.4) * amp * 0.4;
+}
+function wobblyLine(x1, y1, x2, y2, seedA, seedB, t, amp) {
+  const jx1 = wobble(seedA * 1.7, t, amp), jy1 = wobble(seedA * 2.3, t, amp);
+  const jx2 = wobble(seedB * 1.3, t, amp), jy2 = wobble(seedB * 3.1, t, amp);
+  const midx = (x1 + x2) / 2 + wobble(seedA + seedB, t, amp * 0.5);
+  const midy = (y1 + y2) / 2 + wobble(seedA - seedB, t, amp * 0.5);
   ctx.beginPath();
-  ctx.moveTo(x1 + jit(seedA * 1.7 + frameSeedBase), y1 + jit(seedA * 2.3 + frameSeedBase));
-  ctx.quadraticCurveTo(midx, midy, x2 + jit(seedB * 1.3 + frameSeedBase), y2 + jit(seedB * 3.1 + frameSeedBase));
+  ctx.moveTo(x1 + jx1, y1 + jy1);
+  ctx.quadraticCurveTo(midx, midy, x2 + jx2, y2 + jy2);
   ctx.stroke();
 }
 
-function drawGun(x, y, facing, weaponKey, muzzleFlash) {
-  const dir = facing;
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(dir, 1);
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 3.4;
-  ctx.lineCap = 'round';
+// ---------------- Cartoon gun rendering ----------------
+// Local frame: (0,0) is the grip/hand point, gun points along +x.
+// recoil: 0..1 pulse right after firing. spinAngle: minigun barrel rotation.
+function paintGunShape(g, weaponKey, recoil, spinAngle) {
+  const kick = -recoil * 4;
+  g.save();
+  g.translate(kick, 0);
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+
   if (weaponKey === 'glock') {
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(16, 2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(4, 2); ctx.lineTo(4, 10); ctx.stroke();
+    g.fillStyle = '#3b3f45'; g.strokeStyle = '#111'; g.lineWidth = 2;
+    roundRectPath(g, -2, -5, 22, 7, 2); g.fill(); g.stroke();
+    g.beginPath();
+    g.moveTo(-3, 2); g.lineTo(-7, 15); g.lineTo(-1, 16); g.lineTo(2, 3);
+    g.closePath(); g.fillStyle = '#1a1a1a'; g.fill(); g.stroke();
   } else if (weaponKey === 'ak47') {
-    ctx.beginPath(); ctx.moveTo(-4, -2); ctx.lineTo(30, 2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(6, 2); ctx.lineTo(2, 16); ctx.stroke(); // curved mag approx
-    ctx.beginPath(); ctx.moveTo(-6, -2); ctx.lineTo(-6, 8); ctx.stroke(); // stock
-  } else if (weaponKey === 'minigun') {
-    ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(-4, 0); ctx.lineTo(34, 0); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(-4, -4); ctx.lineTo(34, -4); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(-4, 4); ctx.lineTo(34, 4); ctx.stroke();
+    g.fillStyle = '#4a4d52'; g.strokeStyle = '#111'; g.lineWidth = 2;
+    roundRectPath(g, -10, -4, 44, 7, 2); g.fill(); g.stroke(); // receiver/barrel
+    g.fillStyle = '#8a5a2e';
+    roundRectPath(g, 6, -2, 16, 6, 2); g.fill(); g.stroke(); // handguard
+    roundRectPath(g, -24, -2, 15, 6, 2); g.fill(); g.stroke(); // stock
+    g.beginPath(); // curved magazine
+    g.moveTo(10, 3);
+    g.quadraticCurveTo(16, 14, 12, 24);
+    g.quadraticCurveTo(6, 22, 5, 10);
+    g.closePath();
+    g.fillStyle = '#2a2a2a'; g.fill(); g.stroke();
+    g.beginPath(); g.moveTo(34, -1); g.lineTo(34, -7); g.lineWidth = 2.4; g.stroke(); // front sight
+  } else { // minigun
+    g.fillStyle = '#2f2f33'; g.strokeStyle = '#111'; g.lineWidth = 2;
+    roundRectPath(g, -8, -8, 14, 16, 3); g.fill(); g.stroke(); // housing/grip block
+    g.save();
+    g.translate(16, 0);
+    g.rotate(spinAngle);
+    g.fillStyle = '#55575c';
+    const barrelCount = 6;
+    for (let bIdx = 0; bIdx < barrelCount; bIdx++) {
+      const ang = (Math.PI * 2 * bIdx) / barrelCount;
+      const bx = Math.cos(ang) * 5, by = Math.sin(ang) * 5;
+      g.beginPath();
+      roundRectPathAt(g, bx - 1.6, by - 1.6, 18, 3.2, 1.4);
+      g.fill();
+    }
+    g.strokeStyle = '#111'; g.lineWidth = 1;
+    g.beginPath(); g.arc(0, 0, 6, 0, Math.PI * 2); g.fillStyle = '#1c1c1c'; g.fill(); g.stroke();
+    g.restore();
+    g.fillStyle = '#3a3a3a';
+    roundRectPath(g, -10, 6, 10, 10, 2); g.fill(); g.stroke(); // ammo box hint
   }
-  if (muzzleFlash) {
-    const tipX = weaponKey === 'ak47' ? 30 : (weaponKey === 'minigun' ? 34 : 16);
-    ctx.fillStyle = 'rgba(255, 210, 80, 0.9)';
-    ctx.beginPath();
-    ctx.moveTo(tipX, 0);
-    ctx.lineTo(tipX + 10 + Math.random() * 5, -5 - Math.random() * 4);
-    ctx.lineTo(tipX + 14 + Math.random() * 5, 0);
-    ctx.lineTo(tipX + 10 + Math.random() * 5, 5 + Math.random() * 4);
-    ctx.closePath();
-    ctx.fill();
-  }
-  ctx.restore();
+  g.restore();
+}
+function roundRectPath(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+function roundRectPathAt(g, x, y, w, h, r) { roundRectPath(g, x, y, w, h, r); }
+
+function muzzleTip(weaponKey) {
+  if (weaponKey === 'glock') return { x: 20, y: -1.5 };
+  if (weaponKey === 'minigun') return { x: 34, y: 0 };
+  return { x: 34, y: -1 }; // ak47
 }
 
-// pose: procedurally animated stickman based on anim state (0 idle,1 run,2 jump,3 shoot,4 climb,5 dead)
-function drawStickman(cx, footY, facing, team, anim, t, isDead, weaponKey, hitFlash) {
+// ---------------- Particle system (muzzle smoke, embers, sparks) ----------------
+let particles = [];
+function spawnParticle(p) { if (particles.length < 260) particles.push(p); }
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    if (p.grow) p.size += p.grow * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles(camX) {
+  for (const p of particles) {
+    const a = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = a * (p.baseAlpha ?? 1);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x - camX * (p.parallax ?? 1), p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------------- Entity FX state (recoil pulse, minigun spin) ----------------
+const fx = {}; // entity index -> { recoil, spin }
+function getFx(i) { if (!fx[i]) fx[i] = { recoil: 0, spin: 0 }; return fx[i]; }
+
+// ---------------- Stickman rendering ----------------
+function drawStickman(cx, footY, facing, team, anim, t, isDead, weaponKey, hitFlash, entIndex, isFiringHeld) {
   const teamColor = team === 0 ? '#3aa0ff' : '#ff4d4d';
   const headR = 11;
   const bodyLen = 30;
-  const legLen = 26;
-  const armLen = 22;
+  const legTotal = 26;
+  const thigh = 13, shin = 13;
 
   ctx.save();
-  if (hitFlash) {
-    ctx.filter = 'brightness(2.4) saturate(0)';
-  }
+  if (hitFlash) ctx.filter = 'brightness(2.2) saturate(0)';
 
   if (isDead) {
-    // crumpled on the ground
     const hy = footY - 8;
     ctx.strokeStyle = '#141414';
     ctx.lineWidth = 3.4; ctx.lineCap = 'round';
-    wobblyLine(cx - 22, hy, cx + 22, hy, 1, 2);
-    ctx.beginPath();
-    ctx.arc(cx - 26, hy - 2, headR * 0.9, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - 22, hy); ctx.lineTo(cx + 22, hy); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx - 26, hy - 2, headR * 0.9, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
     return;
   }
 
-  const bob = anim === 1 ? Math.sin(t * 14) * 3 : (anim === 0 ? Math.sin(t * 3) * 1 : 0);
+  const bob = anim === 1 ? Math.sin(t * 14) * 3 : (anim === 0 ? Math.sin(t * 2.4) * 0.8 : 0);
   const headCX = cx;
-  const headCY = footY - legLen - bodyLen - headR + bob;
+  const headCY = footY - legTotal - bodyLen - headR + bob;
   const shoulderY = headCY + headR + 4;
   const hipY = shoulderY + bodyLen;
 
-  // team line above head
+  // team indicator: HORIZONTAL bar above the head
   ctx.strokeStyle = teamColor;
-  ctx.lineWidth = 4;
+  ctx.lineWidth = 4.5;
   ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.moveTo(headCX, headCY - headR - 2);
-  ctx.lineTo(headCX, headCY - headR - 16);
+  ctx.moveTo(headCX - 9, headCY - headR - 9);
+  ctx.lineTo(headCX + 9, headCY - headR - 9);
   ctx.stroke();
 
   ctx.strokeStyle = '#141414';
   ctx.lineWidth = 3.2;
   ctx.lineCap = 'round';
 
-  // head (slightly wobbly circle via short arcs)
+  // head — small stable wobble only, no chaotic jitter
+  const headJX = wobble(entIndex + 1, t, 0.5), headJY = wobble(entIndex + 2, t, 0.5);
   ctx.beginPath();
-  ctx.ellipse(headCX + jit(frameSeedBase), headCY + jit(frameSeedBase * 1.3), headR, headR, 0, 0, Math.PI * 2);
+  ctx.ellipse(headCX + headJX, headCY + headJY, headR, headR, 0, 0, Math.PI * 2);
   ctx.stroke();
 
-  // legs
-  let lLegKnee, lFoot, rLegKnee, rFoot;
-  if (anim === 1) { // run cycle
-    const phase = t * 12;
-    lLegKnee = { x: cx - 6 + Math.sin(phase) * 10, y: hipY + legLen * 0.5 };
-    lFoot = { x: cx + Math.sin(phase) * 16, y: footY };
-    rLegKnee = { x: cx - 6 + Math.sin(phase + Math.PI) * 10, y: hipY + legLen * 0.5 };
-    rFoot = { x: cx + Math.sin(phase + Math.PI) * 16, y: footY };
-  } else if (anim === 2) { // jump: legs tucked
-    lLegKnee = { x: cx - 10, y: hipY + legLen * 0.35 };
-    lFoot = { x: cx - 14, y: hipY + legLen * 0.75 };
-    rLegKnee = { x: cx + 10, y: hipY + legLen * 0.4 };
-    rFoot = { x: cx + 16, y: hipY + legLen * 0.85 };
-  } else if (anim === 4) { // climb
-    const phase = t * 10;
-    lLegKnee = { x: cx - 8, y: hipY + legLen * 0.5 };
-    lFoot = { x: cx - 6 + Math.sin(phase) * 6, y: footY - Math.abs(Math.sin(phase)) * 4 };
-    rLegKnee = { x: cx + 8, y: hipY + legLen * 0.5 };
-    rFoot = { x: cx + 6 + Math.sin(phase + Math.PI) * 6, y: footY - Math.abs(Math.sin(phase + Math.PI)) * 4 };
-  } else { // idle / shoot
-    lLegKnee = { x: cx - 7, y: hipY + legLen * 0.5 };
-    lFoot = { x: cx - 9, y: footY };
-    rLegKnee = { x: cx + 7, y: hipY + legLen * 0.5 };
-    rFoot = { x: cx + 9, y: footY };
+  // ---- LEGS: clean deterministic two-segment cycle, zero jitter ----
+  ctx.lineWidth = 3.4;
+  function drawLeg(phase) {
+    const lift = Math.max(0, Math.sin(phase));
+    const swing = Math.sin(phase) * 15;
+    const footX = cx + swing;
+    const footYd = footY - lift * 9;
+    const kneeX = cx + swing * 0.45;
+    const kneeY = hipY + thigh + (1 - lift) * 2;
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(kneeX, kneeY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(kneeX, kneeY); ctx.lineTo(footX, footYd); ctx.stroke();
   }
-  wobblyLine(cx, hipY, lLegKnee.x, lLegKnee.y, 4, 5);
-  wobblyLine(lLegKnee.x, lLegKnee.y, lFoot.x, lFoot.y, 6, 7);
-  wobblyLine(cx, hipY, rLegKnee.x, rLegKnee.y, 8, 9);
-  wobblyLine(rLegKnee.x, rLegKnee.y, rFoot.x, rFoot.y, 10, 11);
+  function drawStaticLeg(dx) {
+    const kneeX = cx + dx * 0.5, kneeY = hipY + thigh;
+    const footX = cx + dx, footYd = footY;
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(kneeX, kneeY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(kneeX, kneeY); ctx.lineTo(footX, footYd); ctx.stroke();
+  }
 
-  // torso
-  wobblyLine(headCX, shoulderY, cx, hipY, 12, 13);
+  if (anim === 1) { // run
+    const phase = t * 11;
+    drawLeg(phase);
+    drawLeg(phase + Math.PI);
+  } else if (anim === 2) { // jump — tucked, static (no jitter, no shake)
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx - 9, hipY + thigh * 0.7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - 9, hipY + thigh * 0.7); ctx.lineTo(cx - 13, hipY + thigh + shin * 0.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx + 10, hipY + thigh * 0.75); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx + 10, hipY + thigh * 0.75); ctx.lineTo(cx + 15, hipY + thigh + shin * 0.6); ctx.stroke();
+  } else if (anim === 4) { // climb — smooth alternating reach, no jitter
+    const phase = t * 8;
+    const l1 = Math.max(0, Math.sin(phase)) * 6, l2 = Math.max(0, Math.sin(phase + Math.PI)) * 6;
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx - 8, hipY + thigh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx - 8, hipY + thigh); ctx.lineTo(cx - 6, footY - l1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx + 8, hipY + thigh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx + 8, hipY + thigh); ctx.lineTo(cx + 6, footY - l2); ctx.stroke();
+  } else { // idle / shoot — static stable stance
+    drawStaticLeg(-9);
+    drawStaticLeg(9);
+  }
 
-  // arms — one holds the gun forward, other swings
+  // torso — tiny stable wobble, not the old chaotic jitter
+  ctx.lineWidth = 3.4;
+  wobblyLine(headCX, shoulderY, cx, hipY, entIndex + 3, entIndex + 4, t, 0.5);
+
+  // arms
   const gunShoulderX = headCX + facing * 4;
-  const gunHandX = gunShoulderX + facing * armLen;
+  const gunHandX = gunShoulderX + facing * 22;
   const gunHandY = shoulderY + 6;
-  wobblyLine(gunShoulderX, shoulderY, gunHandX, gunHandY, 14, 15);
+  wobblyLine(gunShoulderX, shoulderY, gunHandX, gunHandY, entIndex + 5, entIndex + 6, t, 0.6);
 
-  const swingPhase = anim === 1 ? Math.sin(t * 12 + Math.PI) * 14 : (anim === 4 ? Math.sin(t * 10) * 6 : 0);
+  const swingPhase = anim === 1 ? Math.sin(t * 11 + Math.PI) * 12 : (anim === 4 ? Math.sin(t * 8) * 5 : 0);
   const backHandX = headCX - facing * 8 + swingPhase * 0.3;
   const backHandY = shoulderY + 14 + Math.abs(swingPhase) * 0.2;
-  wobblyLine(headCX - facing * 4, shoulderY, backHandX, backHandY, 16, 17);
+  wobblyLine(headCX - facing * 4, shoulderY, backHandX, backHandY, entIndex + 7, entIndex + 8, t, 0.6);
 
-  // gun
-  const muzzleFlash = anim === 3 && (Math.floor(t * 30) % 2 === 0);
-  drawGun(gunHandX, gunHandY, facing, weaponKey, muzzleFlash);
+  // gun — a real cartoon shape attached at the hand, not a stroke of the arm
+  const fxState = getFx(entIndex);
+  const justFired = anim === 3;
+  if (justFired) fxState.recoil = 1.0;
+  fxState.recoil = Math.max(0, fxState.recoil - 0.09);
+  if (weaponKey === 'minigun' && isFiringHeld) fxState.spin += 0.55;
+  else fxState.spin *= 0.9;
+
+  ctx.save();
+  ctx.translate(gunHandX, gunHandY);
+  ctx.scale(facing, 1);
+  paintGunShape(ctx, weaponKey, fxState.recoil, fxState.spin);
+  if (justFired) {
+    const tip = muzzleTip(weaponKey);
+    ctx.fillStyle = 'rgba(255, 208, 70, 0.95)';
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(tip.x + 9 + Math.random() * 5, tip.y - 5 - Math.random() * 4);
+    ctx.lineTo(tip.x + 14 + Math.random() * 5, tip.y);
+    ctx.lineTo(tip.x + 9 + Math.random() * 5, tip.y + 5 + Math.random() * 4);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  if (justFired) {
+    const tip = muzzleTip(weaponKey);
+    const worldTipX = gunHandX + facing * tip.x;
+    const worldTipY = gunHandY + tip.y;
+    for (let s = 0; s < 3; s++) {
+      spawnParticle({
+        x: worldTipX + (Math.random() - 0.5) * 4, y: worldTipY + (Math.random() - 0.5) * 4,
+        vx: -facing * 12 + (Math.random() - 0.5) * 10, vy: -14 - Math.random() * 10,
+        life: 0.35, maxLife: 0.35, size: 2 + Math.random() * 1.5, color: 'rgba(180,180,180,0.6)', grow: 4,
+      });
+    }
+  }
 
   ctx.restore();
 }
 
-// ---------------- Parallax background ----------------
-function drawBackground(camX) {
-  // sky gradient
+// ---------------- Burned-city background ----------------
+let smokePlumeSeeds = [];
+for (let i = 0; i < 10; i++) smokePlumeSeeds.push({ phase: Math.random() * 10, x: Math.random() });
+
+function drawBackground(camX, t) {
   const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, '#bfe3f7');
-  sky.addColorStop(1, '#eaf6ea');
+  sky.addColorStop(0, '#5b5a5f');
+  sky.addColorStop(0.5, '#8a7060');
+  sky.addColorStop(1, '#c99a6b');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
 
-  // far mountains (slow parallax)
-  ctx.fillStyle = '#a9c7d8';
-  const farOffset = -camX * 0.15;
-  drawRepeatingHills(farOffset, H * 0.55, 260, 90);
+  // dull orange fire-glow near the horizon
+  const glow = ctx.createLinearGradient(0, H * 0.55, 0, H * 0.85);
+  glow.addColorStop(0, 'rgba(255,120,40,0)');
+  glow.addColorStop(1, 'rgba(255,110,30,0.28)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, H * 0.5, W, H * 0.4);
 
-  // mid hills
-  ctx.fillStyle = '#8fae86';
-  const midOffset = -camX * 0.4;
-  drawRepeatingHills(midOffset, H * 0.68, 180, 70);
+  // broken building skyline
+  const farOffset = -camX * 0.2;
+  ctx.fillStyle = '#332f31';
+  for (const b of buildings) {
+    const sx = ((b.x + farOffset) % (LEVEL_WIDTH + 400) + LEVEL_WIDTH + 400) % (LEVEL_WIDTH + 400) - 200;
+    const topY = H * 0.62 - b.h * 0.55;
+    ctx.fillRect(sx, topY, b.w, b.h);
+    // jagged broken top
+    ctx.beginPath();
+    ctx.moveTo(sx, topY);
+    ctx.lineTo(sx + b.w * (0.3 + b.broken * 0.2), topY - b.h * b.broken * 0.3);
+    ctx.lineTo(sx + b.w * 0.55, topY + b.h * b.broken * 0.15);
+    ctx.lineTo(sx + b.w, topY);
+    ctx.closePath();
+    ctx.fill();
+    // dim broken windows
+    ctx.fillStyle = 'rgba(255,160,70,0.10)';
+    for (let wx = sx + 10; wx < sx + b.w - 10; wx += 22) {
+      for (let wy = topY + 16; wy < topY + b.h - 12; wy += 30) {
+        if (Math.sin(wx * 12.9 + wy * 3.7) > 0.3) ctx.fillRect(wx, wy, 10, 14);
+      }
+    }
+    ctx.fillStyle = '#332f31';
+  }
 
-  // sun/cloud detail (very slow)
-  ctx.fillStyle = 'rgba(255,255,255,0.8)';
-  const cloudOffset = (-camX * 0.08) % 500;
-  for (let i = -1; i < 6; i++) {
-    const cx = cloudOffset + i * 500 + 100;
-    drawCloud(cx, 90 + (i % 3) * 30);
+  // drifting smoke plumes
+  ctx.fillStyle = 'rgba(70,66,64,0.35)';
+  for (const s of smokePlumeSeeds) {
+    const bx = ((s.x * (LEVEL_WIDTH + 600) + farOffset * 0.6) % (LEVEL_WIDTH + 600) + (LEVEL_WIDTH + 600)) % (LEVEL_WIDTH + 600) - 300;
+    const by = H * 0.32 - Math.sin(t * 0.2 + s.phase) * 14;
+    for (let k = 0; k < 4; k++) {
+      ctx.beginPath();
+      ctx.ellipse(bx + k * 14 + Math.sin(t * 0.15 + k) * 6, by - k * 10, 22 - k * 2, 16 - k, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
-}
-function drawCloud(x, y) {
-  ctx.beginPath();
-  ctx.ellipse(x, y, 30, 16, 0, 0, Math.PI * 2);
-  ctx.ellipse(x + 22, y + 4, 22, 13, 0, 0, Math.PI * 2);
-  ctx.ellipse(x - 20, y + 5, 20, 12, 0, 0, Math.PI * 2);
-  ctx.fill();
-}
-function drawRepeatingHills(offset, baseY, period, amp) {
-  ctx.beginPath();
-  ctx.moveTo(0, H);
-  const start = -period;
-  for (let x = start; x < W + period; x += period) {
-    const localX = x + (offset % period);
-    ctx.quadraticCurveTo(localX + period * 0.5, baseY - amp, localX + period, baseY);
-  }
-  ctx.lineTo(W, H);
-  ctx.closePath();
-  ctx.fill();
 }
 
 function drawGroundAndPlatforms(camX) {
-  ctx.strokeStyle = '#3a2a1c';
-  ctx.fillStyle = '#6b4a30';
   for (const p of platforms) {
     if (p.type === 1) {
-      // ladder
-      ctx.strokeStyle = '#8a6a3a';
-      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#7a5c34'; ctx.lineWidth = 4;
       const sx = p.x - camX;
       ctx.beginPath(); ctx.moveTo(sx + 6, p.y); ctx.lineTo(sx + 6, p.y + p.h); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(sx + p.w - 6, p.y); ctx.lineTo(sx + p.w - 6, p.y + p.h); ctx.stroke();
@@ -312,41 +457,121 @@ function drawGroundAndPlatforms(camX) {
       continue;
     }
     const sx = p.x - camX;
-    ctx.fillStyle = '#7a5636';
+    ctx.fillStyle = '#3d3a38'; // cracked asphalt / rubble
     ctx.fillRect(sx, p.y, p.w, p.h);
-    ctx.fillStyle = '#5f8f4a';
-    ctx.fillRect(sx, p.y, p.w, 10);
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillStyle = '#4d4744';
+    ctx.fillRect(sx, p.y, p.w, 9);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
     ctx.lineWidth = 1;
-    for (let gx = 0; gx < p.w; gx += 40) {
-      ctx.beginPath(); ctx.moveTo(sx + gx, p.y + 10); ctx.lineTo(sx + gx, p.y + p.h); ctx.stroke();
-    }
-  }
-}
-
-function drawForegroundDecor(camX) {
-  for (const d of foregroundDecor) {
-    const sx = d.x - camX * 1.06; // slightly faster than camera = foreground depth
-    if (d.kind === 'crate') {
-      ctx.fillStyle = '#5a3d22';
-      ctx.fillRect(sx, d.y, d.w, d.h);
-      ctx.strokeStyle = '#2c1c0e';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(sx, d.y, d.w, d.h);
+    for (let gx = 12; gx < p.w; gx += 46) {
       ctx.beginPath();
-      ctx.moveTo(sx, d.y); ctx.lineTo(sx + d.w, d.y + d.h);
-      ctx.moveTo(sx + d.w, d.y); ctx.lineTo(sx, d.y + d.h);
+      ctx.moveTo(sx + gx, p.y + 9);
+      ctx.lineTo(sx + gx + 10 + Math.sin(gx) * 6, p.y + p.h * 0.5);
       ctx.stroke();
-    } else if (d.kind === 'pillar') {
-      ctx.fillStyle = '#4a4a52';
-      ctx.fillRect(sx, d.y, d.w, d.h);
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.fillRect(sx, d.y, 12, d.h);
+    }
+    // scattered debris speckle
+    ctx.fillStyle = 'rgba(20,20,20,0.4)';
+    for (let dxk = 8; dxk < p.w; dxk += 27) {
+      ctx.beginPath();
+      ctx.arc(sx + dxk, p.y + 12 + (dxk % 7), 1.6, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 }
 
-// ---------------- Bullets / muzzle particles ----------------
+// fleeing civilians — pure background atmosphere, independent of camera/world,
+// non-interactive (not part of the wasm entity/bullet system at all)
+let civilians = [];
+function initCivilians() {
+  civilians = [];
+  for (let i = 0; i < 5; i++) {
+    civilians.push({
+      x: Math.random() * (W + 400),
+      y: H * 0.635 + (i % 2) * 8,
+      speed: 70 + Math.random() * 55,
+      phase: Math.random() * 10,
+      scale: 0.7 + Math.random() * 0.25,
+    });
+  }
+}
+function drawFleeingCivilians(dt, t) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(15,14,16,0.55)';
+  ctx.lineWidth = 2.6;
+  ctx.lineCap = 'round';
+  for (const c of civilians) {
+    c.x -= c.speed * dt;
+    if (c.x < -60) { c.x = W + Math.random() * 200; c.y = H * 0.635 + Math.random() * 14; c.speed = 70 + Math.random() * 55; }
+    const s = c.scale;
+    const cx = c.x, footY = c.y;
+    const legPhase = t * 16 + c.phase;
+    const headR = 6 * s;
+    const bodyLen = 16 * s, legLen = 14 * s;
+    const headCY = footY - legLen - bodyLen - headR;
+    const shoulderY = headCY + headR + 2;
+    const hipY = shoulderY + bodyLen;
+    ctx.beginPath(); ctx.arc(cx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, shoulderY); ctx.lineTo(cx, hipY); ctx.stroke();
+    // legs — panicked sprint
+    const sw = Math.sin(legPhase) * 10 * s;
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx + sw, footY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx - sw, footY); ctx.stroke();
+    // arms raised — hands up
+    ctx.beginPath(); ctx.moveTo(cx, shoulderY); ctx.lineTo(cx - 9 * s, shoulderY - 13 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, shoulderY); ctx.lineTo(cx + 9 * s, shoulderY - 13 * s); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// burning wrecked cars — foreground, occludes the player (walk-behind depth)
+function drawWreckedCars(camX, dt, t) {
+  for (const car of wreckedCars) {
+    const sx = car.x - camX * 1.05;
+    if (sx < -220 || sx > W + 220) continue;
+
+    ctx.fillStyle = '#26221f';
+    roundRectPath(ctx, sx, car.y, car.w, car.h, 8);
+    ctx.fill();
+    ctx.fillStyle = '#1a1715';
+    roundRectPath(ctx, sx + car.w * 0.18, car.y - 20, car.w * 0.5, 24, 6);
+    ctx.fill();
+    ctx.fillStyle = '#0f0d0c';
+    ctx.beginPath(); ctx.arc(sx + car.w * 0.22, car.y + car.h, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + car.w * 0.78, car.y + car.h, 12, 0, Math.PI * 2); ctx.fill();
+
+    // flame — layered flicker shapes, continuously animated
+    const baseX = sx + car.w * 0.35, baseY = car.y - 10;
+    for (let f = 0; f < 3; f++) {
+      const flick = Math.sin(t * 14 + f * 2.1 + car.x) * 4;
+      const h = 26 - f * 6 + Math.sin(t * 9 + f) * 4;
+      ctx.beginPath();
+      ctx.moveTo(baseX + f * 14 - 8, baseY);
+      ctx.quadraticCurveTo(baseX + f * 14 + flick, baseY - h, baseX + f * 14 + 6, baseY);
+      ctx.closePath();
+      ctx.fillStyle = f === 0 ? 'rgba(255,90,20,0.9)' : (f === 1 ? 'rgba(255,160,30,0.85)' : 'rgba(255,220,90,0.8)');
+      ctx.fill();
+    }
+
+    if (Math.random() < 0.6) {
+      spawnParticle({
+        x: baseX + car.x - sx + (Math.random() - 0.5) * 20, y: baseY,
+        vx: (Math.random() - 0.5) * 12, vy: -30 - Math.random() * 20,
+        life: 1.6 + Math.random(), maxLife: 2.4, size: 5 + Math.random() * 4,
+        color: 'rgba(90,88,86,0.35)', grow: 6, parallax: 1.05,
+      });
+    }
+    if (Math.random() < 0.5) {
+      spawnParticle({
+        x: baseX + car.x - sx + (Math.random() - 0.5) * 10, y: baseY - 4,
+        vx: (Math.random() - 0.5) * 20, vy: -60 - Math.random() * 30,
+        life: 0.6 + Math.random() * 0.4, maxLife: 1.0, size: 1.4 + Math.random(),
+        color: 'rgba(255,150,60,0.9)', baseAlpha: 1, parallax: 1.05,
+      });
+    }
+  }
+}
+
+// ---------------- Bullets ----------------
 function drawBullets(camX) {
   const maxB = wasm.getMaxBullets();
   for (let i = 0; i < maxB; i++) {
@@ -361,9 +586,75 @@ function drawBullets(camX) {
   }
 }
 
+// ---------------- Audio ----------------
+let audioCtx = null;
+let noiseBuffer = null;
+function initAudio() {
+  if (audioCtx) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  audioCtx = new Ctx();
+  const len = Math.floor(audioCtx.sampleRate * 1);
+  noiseBuffer = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  startAmbient();
+}
+function playNoiseBurst({ freq, q, dur, gain }) {
+  if (!audioCtx) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = noiseBuffer; src.loop = true;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass'; filter.frequency.value = freq; filter.Q.value = q;
+  const g = audioCtx.createGain();
+  const now = audioCtx.currentTime;
+  g.gain.setValueAtTime(gain, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+  src.connect(filter).connect(g).connect(audioCtx.destination);
+  src.start(now);
+  src.stop(now + dur + 0.02);
+}
+function playGunSound(key) {
+  const w = WEAPONS[key];
+  if (w) playNoiseBurst({ freq: w.sound.freq, q: w.sound.q, dur: w.sound.dur, gain: w.sound.gain });
+}
+function startAmbient() {
+  const osc = audioCtx.createOscillator();
+  osc.type = 'sine'; osc.frequency.value = 46;
+  const oscGain = audioCtx.createGain(); oscGain.gain.value = 0.05;
+  osc.connect(oscGain).connect(audioCtx.destination);
+  osc.start();
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = noiseBuffer; src.loop = true;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass'; filter.frequency.value = 750; filter.Q.value = 0.5;
+  const g = audioCtx.createGain(); g.gain.value = 0.028;
+  src.connect(filter).connect(g).connect(audioCtx.destination);
+  src.start();
+
+  scheduleDistantBoom();
+}
+function scheduleDistantBoom() {
+  const delay = 6 + Math.random() * 9;
+  setTimeout(() => {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(65, now);
+    osc.frequency.exponentialRampToValueAtTime(32, now + 0.45);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.13, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(now); osc.stop(now + 0.7);
+    scheduleDistantBoom();
+  }, delay * 1000);
+}
+
 // ---------------- HUD / game state ----------------
 let gameStarted = false;
-let lastHitFlashTimer = {};
 let playerDead = false;
 let levelWon = false;
 
@@ -383,9 +674,7 @@ function checkWinLoss() {
     return;
   }
   let anyEnemyAlive = false;
-  for (let i = 1; i <= enemyCount; i++) {
-    if (wasm.getEntAlive(i)) anyEnemyAlive = true;
-  }
+  for (let i = 1; i <= enemyCount; i++) if (wasm.getEntAlive(i)) anyEnemyAlive = true;
   if (!anyEnemyAlive) {
     levelWon = true;
     document.getElementById('winScreen').style.display = 'flex';
@@ -401,17 +690,17 @@ function loop(ts) {
   const dt = Math.min(0.033, (ts - lastTime) / 1000 || 0);
   lastTime = ts;
   elapsed += dt;
-  frameSeedBase = elapsed * 37.0;
 
+  let wantFire = false;
   if (!playerDead && !levelWon) {
-    const left = keys['KeyA'] || keys['ArrowLeft'] ? 1 : 0;
-    const right = keys['KeyD'] || keys['ArrowRight'] ? 1 : 0;
-    const jump = keys['KeyW'] || keys['ArrowUp'] || keys['Space'] ? 1 : 0;
-    const up = keys['KeyW'] || keys['ArrowUp'] ? 1 : 0;
-    const down = keys['KeyS'] || keys['ArrowDown'] ? 1 : 0;
+    const left = keys['ArrowLeft'] ? 1 : 0;
+    const right = keys['ArrowRight'] ? 1 : 0;
+    const jump = keys['Space'] ? 1 : 0;
+    const up = keys['ArrowUp'] ? 1 : 0;
+    const down = keys['ArrowDown'] ? 1 : 0;
     wasm.setPlayerInput(left, right, jump, up, down);
 
-    const wantFire = keys['KeyJ'] || mouseDown;
+    wantFire = keys['KeyS'] || mouseDown;
     const weapon = WEAPONS[currentWeaponKey];
     weaponCooldownTimer -= dt;
     if (wantFire && weaponCooldownTimer <= 0) {
@@ -420,25 +709,31 @@ function loop(ts) {
       const spread = (Math.random() - 0.5) * weapon.spread;
       const vx = Math.cos(spread) * weapon.speed * facing;
       const vy = Math.sin(spread) * weapon.speed;
-      wasm.tryPlayerFire(vx, vy, weapon.dmg);
+      const shotIdx = wasm.tryPlayerFire(vx, vy, weapon.dmg);
+      if (shotIdx >= 0) playGunSound(currentWeaponKey);
     }
 
     wasm.step(dt);
-    const killed = wasm.getKilledEntity();
-    if (killed >= 0) { /* could trigger particle burst here later */ }
+
+    // enemy gunfire sound cue
+    for (let i = 1; i <= enemyCount; i++) {
+      if (wasm.getEntAlive(i) && wasm.getEntAnim(i) === 3) playGunSound('ak47');
+    }
   }
 
-  render();
+  updateParticles(dt);
+  render(dt, wantFire);
   updateHUD();
   checkWinLoss();
 }
 
-function render() {
+function render(dt, isFiringHeld) {
   const playerX = wasm.getEntX(0);
   let camX = playerX - W * 0.4;
   camX = Math.max(0, Math.min(LEVEL_WIDTH - W, camX));
 
-  drawBackground(camX);
+  drawBackground(camX, elapsed);
+  drawFleeingCivilians(dt, elapsed);
   drawGroundAndPlatforms(camX);
 
   const count = wasm.getEntCount();
@@ -454,15 +749,17 @@ function render() {
       alive: wasm.getEntAlive(i),
     });
   }
-  // sort by footY for pseudo-depth (further back drawn first)
   entities.sort((a, b) => a.footY - b.footY);
+  const hitIdx = wasm.getHitFlashEntity();
   for (const e of entities) {
-    const hit = wasm.getHitFlashEntity() === e.i;
-    drawStickman(e.x, e.footY, e.facing, e.team, e.anim, elapsed, !e.alive, e.i === 0 ? currentWeaponKey : 'ak47', hit);
+    const weaponForThis = e.i === 0 ? currentWeaponKey : 'ak47';
+    const firing = e.i === 0 ? isFiringHeld : (e.anim === 3);
+    drawStickman(e.x, e.footY, e.facing, e.team, e.anim, elapsed, !e.alive, weaponForThis, hitIdx === e.i, e.i, firing);
   }
 
   drawBullets(camX);
-  drawForegroundDecor(camX);
+  drawParticles(camX);
+  drawWreckedCars(camX, dt, elapsed);
 }
 
 // ---------------- Team select / start wiring ----------------
@@ -478,15 +775,18 @@ document.getElementById('startBtn').addEventListener('click', startGame);
 
 async function startGame() {
   if (!wasm) await loadWasm();
-  wasm.resetWorld();
-  for (const p of platforms) wasm.addPlatform(p.x, p.y, p.w, p.h, p.type);
-  buildEntities();
+  buildWorld();
+  initCivilians();
+  particles = [];
+  for (const k in fx) delete fx[k];
   playerDead = false; levelWon = false;
   document.getElementById('deathScreen').style.display = 'none';
   document.getElementById('winScreen').style.display = 'none';
   document.getElementById('overlay').style.display = 'none';
   document.getElementById('hud').style.display = 'flex';
-  switchWeapon(currentWeaponKey);
+  currentWeaponKey = 'ak47';
+  weaponCooldownTimer = 0;
+  initAudio();
   gameStarted = true;
   lastTime = performance.now();
 }
