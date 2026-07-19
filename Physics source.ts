@@ -29,9 +29,11 @@ let entHP: StaticArray<f32> = new StaticArray<f32>(MAX_ENTITIES);
 let entClimbing: StaticArray<i32> = new StaticArray<i32>(MAX_ENTITIES);
 let entAnim: StaticArray<i32> = new StaticArray<i32>(MAX_ENTITIES); // 0 idle 1 run 2 jump 3 shoot 4 climb 5 dead
 let entCooldown: StaticArray<f32> = new StaticArray<f32>(MAX_ENTITIES);
-let entAIState: StaticArray<i32> = new StaticArray<i32>(MAX_ENTITIES); // 0 patrol 1 alert/shoot
+let entAIState: StaticArray<i32> = new StaticArray<i32>(MAX_ENTITIES); // 0 patrol 1 chase 2 engage 3 retreat
 let entAITimer: StaticArray<f32> = new StaticArray<f32>(MAX_ENTITIES);
+let entMaxHP: StaticArray<f32> = new StaticArray<f32>(MAX_ENTITIES);
 let entCount: i32 = 0;
+let worldTime: f32 = 0.0;
 
 // ---- Bullets ----
 let bulX: StaticArray<f32> = new StaticArray<f32>(MAX_BULLETS);
@@ -80,8 +82,10 @@ export function spawnEntity(x: f32, y: f32, w: f32, h: f32, team: i32, hp: f32):
   entX[i] = x; entY[i] = y; entVX[i] = 0; entVY[i] = 0;
   entW[i] = w; entH[i] = h; entTeam[i] = team;
   entAlive[i] = 1; entOnGround[i] = 0; entFacing[i] = team == 0 ? 1 : -1;
-  entHP[i] = hp; entClimbing[i] = 0; entAnim[i] = 0; entCooldown[i] = 0;
-  entAIState[i] = 0; entAITimer[i] = 0;
+  entHP[i] = hp; entMaxHP[i] = hp; entClimbing[i] = 0; entAnim[i] = 0;
+  // stagger fire-ready timers so enemies don't volley in perfect sync
+  entCooldown[i] = <f32>(i % 5) * 0.13;
+  entAIState[i] = 0; entAITimer[i] = <f32>(i % 3) * 0.5;
   entCount++;
   return i;
 }
@@ -167,34 +171,86 @@ function stepPlayer(dt: f32): void {
   else entAnim[i] = 0;
 }
 
+// Marches along a segment in short steps and rejects it if any solid
+// (non-climbable) platform blocks the view — enemies can no longer
+// see or shoot through walls.
+function lineOfSightClear(x0: f32, y0: f32, x1: f32, y1: f32): bool {
+  const dx: f32 = x1 - x0;
+  const dy: f32 = y1 - y0;
+  const dist: f32 = sqrt(dx * dx + dy * dy);
+  let steps: i32 = <i32>(dist / 24.0);
+  if (steps < 4) steps = 4;
+  if (steps > 40) steps = 40;
+  for (let s = 1; s < steps; s++) {
+    const t: f32 = <f32>s / <f32>steps;
+    const px: f32 = x0 + dx * t;
+    const py: f32 = y0 + dy * t;
+    for (let p = 0; p < platCount; p++) {
+      if (platType[p] != 0) continue;
+      if (px > platX[p] && px < platX[p] + platW[p] && py > platY[p] && py < platY[p] + platH[p]) return false;
+    }
+  }
+  return true;
+}
+
+// States: 0 patrol, 1 chase (close the gap), 2 engage (hold range + strafe
+// + lead shots), 3 retreat (kite away when hurt, still fires opportunistically)
 function stepEnemyAI(i: i32, dt: f32): void {
   if (!entAlive[i]) return;
-  const px = entX[0], py = entY[0];
-  const dx = px - entX[i];
-  const dy = py - entY[i];
-  const dist = sqrt(dx * dx + dy * dy);
+
+  const selfCX: f32 = entX[i] + entW[i] * 0.5;
+  const selfCY: f32 = entY[i] + entH[i] * 0.4;
+  const px: f32 = entX[0] + entW[0] * 0.5;
+  const py: f32 = entY[0] + entH[0] * 0.4;
+  const dx: f32 = px - selfCX;
+  const dy: f32 = py - selfCY;
+  const dist: f32 = sqrt(dx * dx + dy * dy);
+  const hpRatio: f32 = entHP[i] / entMaxHP[i];
+  const playerAlive: bool = entAlive[0] == 1;
+  const sees: bool = playerAlive && dist < 560.0 && lineOfSightClear(selfCX, selfCY, px, py);
 
   entAITimer[i] -= dt;
 
-  if (dist < 420 && entAlive[0]) {
-    entAIState[i] = 1;
-    entFacing[i] = dx > 0 ? 1 : -1;
-    entVX[i] = 0;
-    if (entAITimer[i] <= 0) {
-      const dirx: f32 = dx / (dist + 0.001);
-      const diry: f32 = dy / (dist + 0.001);
-      fireBullet(entX[i] + entW[i] * 0.5, entY[i] + entH[i] * 0.4, dirx * 480, diry * 480, entTeam[i], 8.0);
-      entAnim[i] = 3;
-      entAITimer[i] = 1.1;
-    }
-  } else {
-    entAIState[i] = 0;
+  let state: i32 = 0;
+  if (hpRatio < 0.3 && playerAlive) state = 3;
+  else if (sees) state = dist > 260.0 ? 1 : 2;
+  entAIState[i] = state;
+
+  let moveDir: f32 = 0.0;
+  if (state == 0) {
+    // patrol: wander, flip direction on a per-enemy timer
+    if (entAITimer[i] <= 0.0) { entFacing[i] = -entFacing[i]; entAITimer[i] = 1.6 + <f32>(i % 3) * 0.4; }
+    moveDir = <f32>entFacing[i] * 0.42;
+    entAnim[i] = moveDir != 0.0 ? 1 : 0;
+  } else if (state == 1) {
+    // chase: close the distance to engagement range
+    entFacing[i] = dx > 0.0 ? 1 : -1;
+    moveDir = <f32>entFacing[i] * 0.85;
     entAnim[i] = 1;
-    entVX[i] = <f32>entFacing[i] * MOVE_SPEED * 0.45;
-    if (entAITimer[i] <= 0) {
-      entFacing[i] = -entFacing[i];
-      entAITimer[i] = 2.2;
-    }
+  } else if (state == 2) {
+    // engage: hold ground, strafe smoothly so it's harder to hit
+    entFacing[i] = dx > 0.0 ? 1 : -1;
+    moveDir = Mathf.sin(worldTime * 2.3 + <f32>i * 1.7) * 0.5;
+    entAnim[i] = (moveDir > 0.15 || moveDir < -0.15) ? 1 : 0;
+  } else {
+    // retreat: back off while still facing the player (kiting)
+    entFacing[i] = dx > 0.0 ? 1 : -1;
+    moveDir = dx > 0.0 ? -0.7 : 0.7;
+    entAnim[i] = 1;
+  }
+  entVX[i] = moveDir * MOVE_SPEED;
+
+  if ((state == 1 || state == 2 || state == 3) && sees && entCooldown[i] <= 0.0) {
+    // predictive aim: lead the shot based on the player's current velocity
+    const leadTime: f32 = min(dist / 480.0, 0.55);
+    const predX: f32 = px + entVX[0] * leadTime;
+    const predY: f32 = py + entVY[0] * leadTime;
+    const ddx: f32 = predX - selfCX;
+    const ddy: f32 = predY - selfCY;
+    const ddist: f32 = sqrt(ddx * ddx + ddy * ddy) + 0.001;
+    fireBullet(selfCX, selfCY, (ddx / ddist) * 480.0, (ddy / ddist) * 480.0, entTeam[i], 8.0);
+    entAnim[i] = 3;
+    entCooldown[i] = state == 3 ? (1.4 + <f32>(i % 3) * 0.3) : (0.7 + <f32>(i % 4) * 0.16);
   }
 
   entVY[i] += GRAVITY * dt;
@@ -202,9 +258,9 @@ function stepEnemyAI(i: i32, dt: f32): void {
   entX[i] += entVX[i] * dt;
   entY[i] += entVY[i] * dt;
   resolvePlatformCollision(i);
-  if (entOnGround[i] && entAIState[i] == 0) entAnim[i] = 1;
+  if (entOnGround[i] && state == 0) entAnim[i] = moveDir != 0.0 ? 1 : 0;
 
-  if (entCooldown[i] > 0) entCooldown[i] -= dt;
+  if (entCooldown[i] > 0.0) entCooldown[i] -= dt;
 }
 
 function stepBullets(dt: f32): void {
@@ -244,6 +300,7 @@ function stepBullets(dt: f32): void {
 }
 
 export function step(dt: f32): void {
+  worldTime += dt;
   hitFlashEntity = -1;
   killedEntity = -1;
   stepPlayer(dt);
@@ -282,3 +339,4 @@ export function getMaxBullets(): i32 { return MAX_BULLETS; }
 
 export function getHitFlashEntity(): i32 { return hitFlashEntity; }
 export function getKilledEntity(): i32 { return killedEntity; }
+export function getEntAIState(i: i32): i32 { return entAIState[i]; }
