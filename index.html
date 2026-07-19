@@ -46,6 +46,19 @@
   }
   #controls-hint { font-size: 0.85em; opacity: 0.6; max-width: 480px; text-align: center; }
 
+  #weaponToast {
+    position: fixed; top: 14px; right: 14px; z-index: 15;
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(15,16,20,0.88); border: 2px solid #000; border-radius: 8px;
+    padding: 8px 16px 8px 10px; color: #fff; font-family: system-ui, sans-serif;
+    opacity: 0; transform: translateY(-8px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    pointer-events: none;
+  }
+  #weaponToast.show { opacity: 1; transform: translateY(0); }
+  #weaponToast canvas { display:block; }
+  #weaponToastName { font-weight: 800; letter-spacing: 1px; font-size: 1.05em; }
+
   #hud {
     position: fixed; top: 14px; left: 14px; right: 14px; z-index: 10;
     display: flex; justify-content: space-between; align-items: flex-start;
@@ -55,7 +68,6 @@
   #hpWrap { display:flex; flex-direction:column; gap:4px; }
   #hpBarOuter { width: 220px; height: 16px; background: rgba(0,0,0,0.4); border: 2px solid #000; border-radius: 4px; overflow:hidden; }
   #hpBarInner { height: 100%; width: 100%; background: linear-gradient(90deg,#7CFC00,#3d9c1a); transition: width 0.15s; }
-  #weaponName { font-size: 1.1em; font-weight: 700; letter-spacing: 1px; }
   #weaponHint { font-size: 0.75em; opacity: 0.75; }
   #teamTag { font-weight: 700; font-size: 1.3em; }
 
@@ -78,16 +90,16 @@
   <div class="sub">pick your side</div>
   <div class="teamRow">
     <div class="teamBtn blue" id="pickBlue">
-      <svg viewBox="0 0 70 90"><line x1="35" y1="0" x2="35" y2="14" stroke="#3aa0ff" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
+      <svg viewBox="0 0 70 90"><line x1="26" y1="10" x2="44" y2="10" stroke="#3aa0ff" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
       BLUE TEAM
     </div>
     <div class="teamBtn red" id="pickRed">
-      <svg viewBox="0 0 70 90"><line x1="35" y1="0" x2="35" y2="14" stroke="#ff4d4d" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
+      <svg viewBox="0 0 70 90"><line x1="26" y1="10" x2="44" y2="10" stroke="#ff4d4d" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
       RED TEAM
     </div>
   </div>
   <button id="startBtn">FIGHT ▶</button>
-  <div id="controls-hint">Move: A/D or ←/→ &nbsp;•&nbsp; Jump: W / ↑ / Space &nbsp;•&nbsp; Climb: hold Up on ladders &nbsp;•&nbsp; Shoot: J or click &nbsp;•&nbsp; Weapon: 1 / 2 / 3</div>
+  <div id="controls-hint">Move: ←/→ &nbsp;•&nbsp; Jump: Space &nbsp;•&nbsp; Climb: hold ↑ on ladders &nbsp;•&nbsp; Shoot: S or click &nbsp;•&nbsp; Switch weapon: A</div>
 </div>
 
 <div id="hud" style="display:none;">
@@ -95,10 +107,12 @@
     <div id="teamTag">—</div>
     <div id="hpBarOuter"><div id="hpBarInner"></div></div>
   </div>
-  <div style="text-align:right;">
-    <div id="weaponName">AK-47</div>
-    <div id="weaponHint">1: Glock&nbsp; 2: AK-47&nbsp; 3: Minigun</div>
-  </div>
+  <div id="weaponHint" style="text-align:right; font-size:0.8em; opacity:0.7;">A: switch weapon</div>
+</div>
+
+<div id="weaponToast">
+  <canvas id="weaponToastIcon" width="56" height="30"></canvas>
+  <div id="weaponToastName">AK-47</div>
 </div>
 
 <div id="deathScreen"><h2>YOU DIED</h2><button class="retryBtn" id="retryBtn">RETRY</button></div>
