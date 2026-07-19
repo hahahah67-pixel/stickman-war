@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stickman War</title>
+<style>
+  :root { --blue: #3aa0ff; --red: #ff4d4d; --paper: #f4ecd8; --ink: #1a1a1a; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; overflow: hidden; height: 100%;
+    background: #0b0d12; font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  #gameCanvas { display: block; background: #cfe8f7; touch-action: none; }
+
+  #overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 28px;
+    background: radial-gradient(ellipse at center, #22262f 0%, #0b0d12 100%);
+    color: var(--paper); z-index: 20;
+  }
+  #overlay h1 {
+    font-size: 2.6em; margin: 0; letter-spacing: 2px;
+    text-shadow: 3px 3px 0 #000, -1px -1px 0 #000;
+    font-family: 'Comic Sans MS', 'Marker Felt', sans-serif;
+  }
+  #overlay .sub { opacity: 0.7; margin-top: -18px; font-size: 0.95em; }
+  .teamRow { display: flex; gap: 40px; }
+  .teamBtn {
+    width: 180px; padding: 18px 10px; border-radius: 10px; cursor: pointer;
+    border: 3px solid #000; background: #1c1f26; color: #fff;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    font-size: 1.05em; font-weight: 600;
+  }
+  .teamBtn:hover { transform: translateY(-4px) scale(1.03); }
+  .teamBtn.blue { box-shadow: 0 0 0 0 var(--blue); border-color: var(--blue); }
+  .teamBtn.red { box-shadow: 0 0 0 0 var(--red); border-color: var(--red); }
+  .teamBtn.blue:hover { box-shadow: 0 6px 18px -2px var(--blue); }
+  .teamBtn.red:hover { box-shadow: 0 6px 18px -2px var(--red); }
+  .teamBtn svg { width: 70px; height: 90px; }
+  #startBtn {
+    margin-top: 6px; padding: 12px 34px; font-size: 1.1em; font-weight: 700;
+    border-radius: 8px; border: 3px solid #000; cursor: pointer;
+    background: #ffcf4d; color: #1a1a1a; display: none;
+  }
+  #controls-hint { font-size: 0.85em; opacity: 0.6; max-width: 480px; text-align: center; }
+
+  #hud {
+    position: fixed; top: 14px; left: 14px; right: 14px; z-index: 10;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none; font-family: system-ui, sans-serif; color: #fff;
+    text-shadow: 1px 1px 2px #000;
+  }
+  #hpWrap { display:flex; flex-direction:column; gap:4px; }
+  #hpBarOuter { width: 220px; height: 16px; background: rgba(0,0,0,0.4); border: 2px solid #000; border-radius: 4px; overflow:hidden; }
+  #hpBarInner { height: 100%; width: 100%; background: linear-gradient(90deg,#7CFC00,#3d9c1a); transition: width 0.15s; }
+  #weaponName { font-size: 1.1em; font-weight: 700; letter-spacing: 1px; }
+  #weaponHint { font-size: 0.75em; opacity: 0.75; }
+  #teamTag { font-weight: 700; font-size: 1.3em; }
+
+  #deathScreen, #winScreen {
+    position: fixed; inset: 0; display:none; align-items:center; justify-content:center;
+    flex-direction: column; gap: 16px; background: rgba(0,0,0,0.75); color:#fff; z-index: 25;
+  }
+  #deathScreen h2 { color: #ff5c5c; font-size: 2.4em; margin:0; }
+  #winScreen h2 { color: #ffd93d; font-size: 2.4em; margin:0; }
+  .retryBtn {
+    padding: 10px 28px; font-size: 1em; font-weight: 700; border-radius: 8px;
+    border: 3px solid #000; cursor: pointer; background: #ffcf4d;
+  }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>STICKMAN WAR</h1>
+  <div class="sub">pick your side</div>
+  <div class="teamRow">
+    <div class="teamBtn blue" id="pickBlue">
+      <svg viewBox="0 0 70 90"><line x1="35" y1="0" x2="35" y2="14" stroke="#3aa0ff" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
+      BLUE TEAM
+    </div>
+    <div class="teamBtn red" id="pickRed">
+      <svg viewBox="0 0 70 90"><line x1="35" y1="0" x2="35" y2="14" stroke="#ff4d4d" stroke-width="5" stroke-linecap="round"/><circle cx="35" cy="26" r="11" fill="none" stroke="#111" stroke-width="4"/><line x1="35" y1="37" x2="35" y2="65" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="18" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="45" x2="52" y2="58" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="22" y2="88" stroke="#111" stroke-width="4"/><line x1="35" y1="65" x2="48" y2="88" stroke="#111" stroke-width="4"/></svg>
+      RED TEAM
+    </div>
+  </div>
+  <button id="startBtn">FIGHT ▶</button>
+  <div id="controls-hint">Move: A/D or ←/→ &nbsp;•&nbsp; Jump: W / ↑ / Space &nbsp;•&nbsp; Climb: hold Up on ladders &nbsp;•&nbsp; Shoot: J or click &nbsp;•&nbsp; Weapon: 1 / 2 / 3</div>
+</div>
+
+<div id="hud" style="display:none;">
+  <div id="hpWrap">
+    <div id="teamTag">—</div>
+    <div id="hpBarOuter"><div id="hpBarInner"></div></div>
+  </div>
+  <div style="text-align:right;">
+    <div id="weaponName">AK-47</div>
+    <div id="weaponHint">1: Glock&nbsp; 2: AK-47&nbsp; 3: Minigun</div>
+  </div>
+</div>
+
+<div id="deathScreen"><h2>YOU DIED</h2><button class="retryBtn" id="retryBtn">RETRY</button></div>
+<div id="winScreen"><h2>TERRITORY CLEARED</h2><button class="retryBtn" id="winRetryBtn">PLAY AGAIN</button></div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script src="game.js"></script>
+</body>
+</html>
